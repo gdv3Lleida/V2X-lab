@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""
+find_ca_in_oer_debug.py
+Versió depuració: mostra tots els fitxers, accepta noms que continguin '.oer'
+i permet especificar directori i window per cerca.
+"""
+import os
+import binascii
+import sys
+from cryptography.hazmat.primitives.asymmetric import ec
+
+# CONFIG
+TARGET_HASHES = ["ae2d8d9dc6165ddf", "0498fbf3b8b8c249"]
+WINDOW = 256
+
+def find_all_occurrences(bdata, sub):
+    offs = []
+    start = 0
+    while True:
+        i = bdata.find(sub, start)
+        if i == -1:
+            break
+        offs.append(i)
+        start = i + 1
+    return offs
+
+def find_compressed_points(bdata):
+    hits = []
+    for i in range(len(bdata) - 33):
+        if bdata[i] in (2,3):
+            cand = bdata[i:i+33]
+            hits.append((i, cand))
+    return hits
+
+def try_decode_point(comp_bytes):
+    try:
+        pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), comp_bytes)
+        nums = pub.public_numbers()
+        return nums.x, nums.y
+    except Exception:
+        return None
+
+def scan_file(path):
+    print(f"\n--- Scanning file: {path} ---")
+    data = open(path, "rb").read()
+    # print file size
+    print(f"Size: {len(data)} bytes")
+
+    for h in TARGET_HASHES:
+        hbin = binascii.unhexlify(h)
+        locs = find_all_occurrences(data, hbin)
+        if locs:
+            print(f"Found hashedId8 {h} at offsets: {locs}")
+            for off in locs:
+                a = max(0, off-WINDOW)
+                b = min(len(data), off+WINDOW)
+                print(f"  -> window [{a}:{b}] around offset {off}")
+        else:
+            print(f"HashedId8 {h} NOT found in {os.path.basename(path)}")
+
+    comps = find_compressed_points(data)
+    print(f"Found {len(comps)} compressed-point-like candidates in {os.path.basename(path)}")
+    # show candidates near any target
+    nearby = []
+    for (off, cand) in comps:
+        near = False
+        for h in TARGET_HASHES:
+            hbin = binascii.unhexlify(h)
+            if any(abs(off - loc) <= WINDOW for loc in find_all_occurrences(data, hbin)):
+                near = True
+                break
+        if near:
+            nearby.append((off, cand))
+    if nearby:
+        print(f"Candidates near target hashes (<= {WINDOW} bytes): {len(nearby)}")
+        for off, cand in nearby:
+            print(f"  offset {off} : prefix {cand[0]:02x} : {binascii.hexlify(cand).decode()}")
+            dec = try_decode_point(cand)
+            print("    ->", "valid P-256 point" if dec else "not valid")
+    else:
+        print("No compressed-point candidates found near target hashes (try increasing WINDOW).")
+
+if __name__ == "__main__":
+    dir_to_scan = sys.argv[1] if len(sys.argv) > 1 else '.'
+    print("Scanning directory:", os.path.abspath(dir_to_scan))
+    # print all files with repr
+    for f in os.listdir(dir_to_scan):
+        print(" -", repr(f))
+    # pick files that contain ".oer" anywhere (case-insensitive)
+    files = [os.path.join(dir_to_scan, f) for f in os.listdir(dir_to_scan) if '.oer' in f.lower()]
+    print("\nFiles selected for scanning (contain '.oer'):", [os.path.basename(p) for p in files])
+    if not files:
+        print("No files found containing '.oer' in their name. Maybe extension differs.")
+        sys.exit(1)
+    for p in files:
+        scan_file(p)
